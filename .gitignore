@@ -1,0 +1,7 @@
+*/*.toml
+
+*/*.plan
+*/.terraform**
+*/terraform.tfstate*
+*/*.tfvars.*
+!*/example*tfvars.json
