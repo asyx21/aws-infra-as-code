@@ -1,29 +1,13 @@
-# Required providers configuration
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 4.0.0"
-    }
-  }
-
-  required_version = ">= 1.0.11"
-}
-
+# Reference existing resources
 data "aws_vpc" "main" {
 }
 
-# AWS provider configuration
-provider "aws" {
-  # profile = "default"
-  region  = var.region
-  # # Uncomment to use access keys directly from 'dev.secrets.tfvars'
-  # access_key = var.aws_access_key
-  # secret_key = var.aws_secret_key
-}
-
+##############################
+# Networking
+##############################
 # Load balancer security group. CIDR and port ingress can be changed as required.
 resource "aws_security_group" "lb_security_group" {
+  name        = "${terraform.workspace}-${var.app_name}-alb"
   description = "LoadBalancer Security Group"
   vpc_id = data.aws_vpc.main.id
   # ingress {
@@ -33,7 +17,10 @@ resource "aws_security_group" "lb_security_group" {
   #   protocol         = "tcp"
   #   cidr_blocks      = ["0.0.0.0/0"]
   # }
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
+
 resource "aws_security_group_rule" "sg_ingress_rule_all_to_lb" {
   type	= "ingress"
   description = "Allow from anyone on port 80"
@@ -58,6 +45,7 @@ resource "aws_security_group_rule" "sg_egress_rule_lb_to_ecs_cluster" {
 
 # ECS cluster security group.
 resource "aws_security_group" "ecs_security_group" {
+  name        = "${terraform.workspace}-${var.app_name}-ecs"
   description = "ECS Security Group"
   vpc_id = data.aws_vpc.main.id
   egress {
@@ -67,6 +55,8 @@ resource "aws_security_group" "ecs_security_group" {
     protocol         = "-1"
     cidr_blocks      = ["0.0.0.0/0"]
   }
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 # ECS cluster security group ingress from the load balancer.
@@ -80,20 +70,36 @@ resource "aws_security_group_rule" "sg_ingress_rule_ecs_cluster_from_lb" {
   source_security_group_id = aws_security_group.lb_security_group.id
 }
 
+##############################
+# Load Balancer
+##############################
 # Create the internal application load balancer (ALB) in the private subnets.
 resource "aws_lb" "ecs_alb" {
-  load_balancer_type = "application"
-  internal = true
-  subnets = var.private_subnets
-  security_groups = [aws_security_group.lb_security_group.id]
+  name                = "${terraform.workspace}-${var.app_name}-alb"
+  load_balancer_type  = "application"
+  internal            = true
+  subnets             = var.private_subnets
+  security_groups     = [aws_security_group.lb_security_group.id]
+
+  depends_on = [aws_s3_bucket.ecs_cluster]
+  access_logs {
+    bucket  = aws_s3_bucket.ecs_cluster.bucket
+    prefix  = "alb"
+    enabled = true
+  }
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 # Create the ALB target group for ECS.
 resource "aws_lb_target_group" "alb_ecs_tg" {
+  name        = "${terraform.workspace}-${var.app_name}-alb-tg-80"
   port        = 80
   protocol    = "HTTP"
   target_type = "ip"
   vpc_id      = data.aws_vpc.main.id
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 # Create the ALB listener with the target group.
@@ -101,20 +107,29 @@ resource "aws_lb_listener" "ecs_alb_listener" {
   load_balancer_arn = aws_lb.ecs_alb.arn
   port              = "80"
   protocol          = "HTTP"
+
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.alb_ecs_tg.arn
   }
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
+##############################
+# ECS Cluster
+##############################
 # Create the ECS Cluster and Fargate launch type service in the private subnets
 resource "aws_ecs_cluster" "ecs_cluster" {
-  name  = "demo-ecs-cluster"
+  name = "${terraform.workspace}-${var.app_name}-cluster"
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 resource "aws_ecs_service" "demo-ecs-service" {
-  name            = "demo-ecs-svc"
+  depends_on      = [aws_lb_target_group.alb_ecs_tg, aws_lb_listener.ecs_alb_listener]
+  name            = "${terraform.workspace}-${var.app_name}-service"
   cluster         = aws_ecs_cluster.ecs_cluster.id
+
   task_definition = aws_ecs_task_definition.ecs_taskdef.arn
   desired_count   = 2
   deployment_maximum_percent = 200
@@ -122,7 +137,6 @@ resource "aws_ecs_service" "demo-ecs-service" {
   enable_ecs_managed_tags = false
   health_check_grace_period_seconds = 60
   launch_type = "FARGATE"
-  depends_on      = [aws_lb_target_group.alb_ecs_tg, aws_lb_listener.ecs_alb_listener]
 
   load_balancer {
     target_group_arn = aws_lb_target_group.alb_ecs_tg.arn
@@ -135,12 +149,11 @@ resource "aws_ecs_service" "demo-ecs-service" {
     security_groups = [aws_security_group.ecs_security_group.id]
     subnets = var.private_subnets
   }
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 # Create the ECS Service task definition. 
-# 'nginx' image is being used in the container definition.
-# This image is pulled from the docker hub which is the default image repository.
-# ECS task execution role and the task role is used which can be attached with additional IAM policies to configure the required permissions.
 resource "aws_ecs_task_definition" "ecs_taskdef" {
   family = "service"
   container_definitions = jsonencode([
@@ -154,112 +167,79 @@ resource "aws_ecs_task_definition" "ecs_taskdef" {
           protocol      = "tcp"
         }
       ]
+      logConfiguration = {
+        logDriver = "awslogs",
+        options = {
+          awslogs-group         = "${aws_cloudwatch_log_group.ecs_cluster.name}",
+          awslogs-region        = "${var.region}",
+          awslogs-stream-prefix = "ecs"
+        }
+      }
     }
   ])
-  cpu       = 256
-  memory    = 512
-  execution_role_arn = aws_iam_role.dev_ecs_task_role.arn
-  task_role_arn = aws_iam_role.dev_ecs_task_role.arn
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
+  cpu                       = 256
+  memory                    = 512
+  requires_compatibilities  = ["FARGATE"]
+  network_mode              = "awsvpc"
+
+  execution_role_arn        = aws_iam_role.ecs_task_role.arn
+  task_role_arn             = aws_iam_role.ecs_task_role.arn
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
-# # Uncomment if 'execution_role' or 'task_role' are not already created
-# resource "aws_iam_role" "dev_ecs_task_exec_role" {
-#   name = "dev_ecs_task_exec_role"
-#   assume_role_policy = jsonencode({
-#     Version = "2012-10-17"
-#     Statement = [
-#       {
-#         Action = "sts:AssumeRole"
-#         Effect = "Allow"
-#         Principal = {
-#           Service = "ecs-tasks.amazonaws.com"
-#         }
-#       },
-#     ]
-#   })
-# }
-# resource "aws_iam_role" "dev_ecs_task_role" {
-#   name               = "dev_ecs_task_role"
-#   assume_role_policy = jsonencode({
-#     Version = "2012-10-17"
-#     Statement = [
-#       {
-#         Action = "sts:AssumeRole"
-#         Effect = "Allow"
-#         Principal = {
-#           Service = "ecs-tasks.amazonaws.com"
-#         }
-#       },
-#     ]
-#   })
-# }
-# Execution role
-data "aws_iam_policy_document" "fargate_assume_role_policy" {
-  statement {
-    actions = ["sts:AssumeRole"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
-    }
-  }
-}
-resource "aws_iam_role" "dev_ecs_task_role" {
-  name               = "dev_ecs_task_role"
-  path               = "/system/"
-  assume_role_policy = data.aws_iam_policy_document.fargate_assume_role_policy.json
-}
-
+##############################
+# API Gateway
+##############################
 # Create the VPC Link configured with the private subnets. Security groups are kept empty here, but can be configured as required.
 resource "aws_apigatewayv2_vpc_link" "vpclink_apigw_to_alb" {
-  name        = "vpclink_apigw_to_alb"
-  security_group_ids = []
-  subnet_ids = var.private_subnets
+  name                = "${terraform.workspace}-${var.app_name}-apigw"
+  security_group_ids  = []
+  subnet_ids          = var.private_subnets
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 # Create the API Gateway HTTP endpoint
 resource "aws_apigatewayv2_api" "apigw_http_endpoint" {
-  name          = "serverlessland-private-endpoint"
-  protocol_type = "HTTP"
+  name                = "${terraform.workspace}-${var.app_name}-endpoint"
+  protocol_type       = "HTTP"
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 # Create the API Gateway HTTP_PROXY integration between the created API and the private load balancer via the VPC Link.
 # Ensure that the 'DependsOn' attribute has the VPC Link dependency.
 # This is to ensure that the VPC Link is created successfully before the integration and the API GW routes are created.
 resource "aws_apigatewayv2_integration" "apigw_integration" {
-  api_id           = aws_apigatewayv2_api.apigw_http_endpoint.id
-  integration_type = "HTTP_PROXY"
-  integration_uri  = aws_lb_listener.ecs_alb_listener.arn
+  depends_on = [
+    aws_apigatewayv2_vpc_link.vpclink_apigw_to_alb,
+    aws_apigatewayv2_api.apigw_http_endpoint,
+    aws_lb_listener.ecs_alb_listener
+  ]
+  api_id                  = aws_apigatewayv2_api.apigw_http_endpoint.id
+  integration_type        = "HTTP_PROXY"
+  integration_uri         = aws_lb_listener.ecs_alb_listener.arn
 
-  integration_method = "ANY"
-  connection_type    = "VPC_LINK"
-  connection_id      = aws_apigatewayv2_vpc_link.vpclink_apigw_to_alb.id
-  payload_format_version = "1.0"
-  depends_on      = [aws_apigatewayv2_vpc_link.vpclink_apigw_to_alb, 
-                    aws_apigatewayv2_api.apigw_http_endpoint, 
-                    aws_lb_listener.ecs_alb_listener]
+  integration_method      = "ANY"
+  connection_type         = "VPC_LINK"
+  connection_id           = aws_apigatewayv2_vpc_link.vpclink_apigw_to_alb.id
+  payload_format_version  = "1.0"
 }
 
 # API GW route with ANY method
 resource "aws_apigatewayv2_route" "apigw_route" {
+  depends_on  = [aws_apigatewayv2_integration.apigw_integration]
   api_id    = aws_apigatewayv2_api.apigw_http_endpoint.id
   route_key = "ANY /{proxy+}"
   target = "integrations/${aws_apigatewayv2_integration.apigw_integration.id}"
-  depends_on  = [aws_apigatewayv2_integration.apigw_integration]
 }
 
 # Set a default stage
 resource "aws_apigatewayv2_stage" "apigw_stage" {
-  api_id = aws_apigatewayv2_api.apigw_http_endpoint.id
-  name   = "$default"
-  auto_deploy = true
   depends_on  = [aws_apigatewayv2_api.apigw_http_endpoint]
-}
-
-# Generated API GW endpoint URL that can be used to access the application running on a private ECS Fargate cluster.
-output "apigw_endpoint" {
-  value = aws_apigatewayv2_api.apigw_http_endpoint.api_endpoint
-    description = "API Gateway Endpoint"
+  api_id      = aws_apigatewayv2_api.apigw_http_endpoint.id
+  # name        = "${terraform.workspace}-${var.app_name}-http"
+  name        = "$default"
+  auto_deploy = true
 }
