@@ -49,25 +49,13 @@ resource "aws_ecs_task_definition" "fargate" {
 
   container_definitions = jsonencode(local.ecs_container_definitions)
 
-  tags = merge(
-    var.default_tags,
-    {
-      Project      = var.app_name
-      Environment  = terraform.workspace
-    },
-  )
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 resource "aws_ecs_cluster" "fargate" {
   name = "${terraform.workspace}-${var.app_name}-cluster"
 
-  tags = merge(
-    var.default_tags,
-    {
-      Project      = var.app_name
-      Environment  = terraform.workspace
-    },
-  )
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 resource "aws_ecs_cluster_capacity_providers" "fargate" {
@@ -109,25 +97,8 @@ resource "aws_ecs_service" "fargate" {
   load_balancer {
     target_group_arn = aws_alb_target_group.fargate.arn
     container_name   = "${terraform.workspace}-${var.app_name}"
-      container_port = var.container_port
+    container_port   = var.container_port
   }
 
-  # dynamic "load_balancer" {
-  #   for_each = aws_alb_target_group.fargate
-
-  #   content {
-  #     # target_group_arn = aws_alb_target_group.fargate[count.index].id
-  #     target_group_arn = load_balancer.value.id
-  #     container_name   = "${terraform.workspace}-${var.app_name}"
-  #     container_port   = var.container_port
-  #   }
-  # }
-
-  tags = merge(
-    var.default_tags,
-    {
-      Project      = var.app_name
-      Environment  = terraform.workspace
-    },
-  )
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }

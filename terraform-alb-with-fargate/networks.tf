@@ -16,13 +16,7 @@ resource "aws_security_group" "alb" {
     self        = true
   }
 
-  tags = merge(
-    var.default_tags,
-    {
-      Project      = var.app_name
-      Environment  = terraform.workspace
-    },
-  )
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 # Allow ingress rule appropriate to HTTP Protocol used
@@ -107,11 +101,5 @@ resource "aws_security_group" "fargate_ecs" {
     self        = true
   }
 
-  tags = merge(
-    var.default_tags,
-    {
-      Project      = var.app_name
-      Environment  = terraform.workspace
-    },
-  )
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }

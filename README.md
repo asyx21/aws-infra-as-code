@@ -35,3 +35,7 @@ Please copy-paste content in new files `dev.secrets.tfvars` and `dev.tfvars.json
 - `sam validate -t aws-stack.yml`  
 - `sam deploy -t aws-stack.yml -g`  
 - `sam delete` or `sam delete --stack-name sam-app`
+
+## Source
+
+- [https://github.com/aws-samples/serverless-patterns](https://github.com/aws-samples/serverless-patterns)  

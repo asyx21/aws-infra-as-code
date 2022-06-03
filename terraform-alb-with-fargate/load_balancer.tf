@@ -9,37 +9,24 @@ resource "aws_alb" "fargate" {
   subnets         = aws_subnet.fargate_public.*.id
   security_groups = [aws_security_group.alb.id]
 
+  depends_on = [aws_s3_bucket.fargate]
   access_logs {
     bucket  = aws_s3_bucket.fargate.bucket
     prefix  = "alb"
     enabled = true
   }
 
-  depends_on = [aws_s3_bucket.fargate]
-
-  tags = merge(
-    var.default_tags,
-    {
-      Project      = var.app_name
-      Environment  = terraform.workspace
-    },
-  )
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 resource "aws_alb_target_group" "fargate" {
-  name        = "${terraform.workspace}-${var.app_name}-alb-tg2"
+  name        = "${terraform.workspace}-${var.app_name}-alb-tg-${var.container_port}"
   port        = var.container_port
   protocol    = "HTTP"
   vpc_id      = data.aws_vpc.main.id
   target_type = "ip"
 
-  tags = merge(
-    var.default_tags,
-    {
-      Project      = var.app_name
-      Environment  = terraform.workspace
-    },
-  )
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 resource "aws_alb_listener" "fargate" {
@@ -53,13 +40,7 @@ resource "aws_alb_listener" "fargate" {
     type             = "forward"
   }
 
-  tags = merge(
-    var.default_tags,
-    {
-      Project      = var.app_name
-      Environment  = terraform.workspace
-    },
-  )
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
 # Redirection from HTTPS to HTTP
@@ -79,11 +60,5 @@ resource "aws_lb_listener" "front_end" {
     }
   }
 
-  tags = merge(
-    var.default_tags,
-    {
-      Project      = var.app_name
-      Environment  = terraform.workspace
-    },
-  )
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }

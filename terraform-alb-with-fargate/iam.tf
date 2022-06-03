@@ -17,7 +17,6 @@ resource "aws_iam_service_linked_role" "ecs_service" {
 ##########################################
 # Allow ALB to log to S3 Bucket
 ##########################################
-
 data "aws_elb_service_account" "main" {
 }
 
@@ -41,7 +40,6 @@ resource "aws_s3_bucket_policy" "fargate" {
 ##########################################
 # Allow Fargate to publish to logs
 ##########################################
-
 data "aws_iam_policy_document" "log_publishing" {
   statement {
     actions = [
@@ -84,7 +82,9 @@ resource "aws_iam_role_policy_attachment" "fargate_role_log_publishing" {
   policy_arn = aws_iam_policy.fargate_log_publishing.arn
 }
 
-# ECR pull policy
+##########################################
+# Allow to pull ECR images
+##########################################
 data "aws_iam_policy_document" "ecr_image_pull" {
   statement {
     effect = "Allow"
@@ -114,21 +114,21 @@ resource "aws_iam_role_policy_attachment" "fargate_ecr" {
   policy_arn = aws_iam_policy.ecr_image_pull.arn
 }
 
-# Acess ECR without going to the public internet via VPC 
-resource "aws_vpc_endpoint" "internal_vpc" {
-  count = var.az_count
+# # Acess ECR without going to the public internet via VPC 
+# resource "aws_vpc_endpoint" "internal_vpc" {
+#   count = var.az_count
 
-  vpc_id = data.aws_vpc.main.id
-  service_name = "com.amazonaws.${var.region}.ecr.dkr"
-  vpc_endpoint_type = "Interface"
+#   vpc_id = data.aws_vpc.main.id
+#   service_name = "com.amazonaws.${var.region}.ecr.dkr"
+#   vpc_endpoint_type = "Interface"
 
-  security_group_ids = [
-    # module.fargate.private_security_group_id,
-    aws_security_group.fargate_ecs.id,
-  ]
+#   security_group_ids = [
+#     # module.fargate.private_security_group_id,
+#     aws_security_group.fargate_ecs.id,
+#   ]
 
-  subnet_ids = [
-    # module.fargate.private_subnets[count.index].id,
-    aws_subnet.fargate_ecs[count.index].id,
-  ]
-}
+#   subnet_ids = [
+#     # module.fargate.private_subnets[count.index].id,
+#     aws_subnet.fargate_ecs[count.index].id,
+#   ]
+# }
