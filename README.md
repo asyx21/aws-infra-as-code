@@ -25,9 +25,9 @@ Please copy-paste content in new files `dev.secrets.tfvars` and `dev.tfvars.json
 - list workspaces: `terraform workspace list`  
 - `terraform validate`  
 - `terraform plan -var-file="dev.secrets.tfvars.json" -out="out.plan"`  
-- Or if multiple var files: `terraform plan -var-file="dev.secrets.tfvars.json" -var-file="dev.tfvars.json" -out="out.plan"`  
+- Or if multiple var files: `terraform plan -var-file="dev.secrets.tfvars.json" -var-file="dev.config.tfvars.json" -out="out.plan"`  
 - `terraform apply out.plan`  
-- `terraform destroy -var-file="dev.secrets.tfvars.json" -var-file="dev.tfvars.json"`
+- `terraform destroy -var-file="dev.secrets.tfvars.json"`
 
 ### SAM
 
