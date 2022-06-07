@@ -1,6 +1,6 @@
 */*.toml
 
-*/*.plan
+*/*.plan*
 */.terraform**
 */terraform.tfstate*
 */*.tfvars.*

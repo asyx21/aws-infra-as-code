@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  echo_server:
+    image: ealen/echo-server:latest
+    container_name: echo_server
+    hostname: echo_server
+    environment:
+      - ENABLE__ENVIRONMENT=true
+      - PORT=1081
+    # ports:
+    #   - 8080:1081
+    networks:
+      - mock_net
+
+  mock_server:
+    image: mockserver/mockserver
+    container_name: mock_server
+    hostname: mock_server
+    ports:
+      - 80:1080
+    networks:
+      - mock_net
+    environment:
+      LOG_LEVEL: "INFO"
+      SERVER_PORT: 1080
+      PROXY_REMOTE_PORT: 1081
+      PROXY_REMOTE_HOST: echo_server
+
+networks:
+  mock_net:

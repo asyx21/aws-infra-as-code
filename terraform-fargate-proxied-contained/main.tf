@@ -2,6 +2,10 @@
 data "aws_vpc" "main" {
 }
 
+locals {
+  dns_enabled = (var.cert_arn != "") && (var.domain_name != "") ? true : false
+}
+
 ##############################
 # Networking
 ##############################
@@ -14,7 +18,7 @@ resource "aws_security_group" "lb_security_group" {
   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
-resource "aws_security_group_rule" "sg_ingress_rule_all_to_lb" {
+resource "aws_security_group_rule" "sg_ingress_rule_public_to_lb" {
   type	= "ingress"
   description = "Allow from anyone on port 80"
   from_port         = 80
@@ -26,11 +30,11 @@ resource "aws_security_group_rule" "sg_ingress_rule_all_to_lb" {
 }
 
 # Load balancer security group egress rule to ECS cluster security group.
-resource "aws_security_group_rule" "sg_egress_rule_lb_to_ecs_cluster" {
+resource "aws_security_group_rule" "sg_egress_rule_lb_ecs" {
   type	= "egress"
-  description = "Target group egress"
-  from_port         = 80
-  to_port           = 80
+  description = "ECS target group egress"
+  from_port         = var.proxy_port
+  to_port           = var.echo_port
   protocol          = "tcp"
   security_group_id = aws_security_group.lb_security_group.id
   source_security_group_id = aws_security_group.ecs_security_group.id
@@ -53,11 +57,11 @@ resource "aws_security_group" "ecs_security_group" {
 }
 
 # ECS cluster security group ingress from the load balancer.
-resource "aws_security_group_rule" "sg_ingress_rule_ecs_cluster_from_lb" {
+resource "aws_security_group_rule" "sg_ingress_rule_ecs_from_lb" {
   type	= "ingress"
-  description = "Ingress from Load Balancer"
-  from_port         = 80
-  to_port           = 80
+  description = "ECS ingress from Load Balancer"
+  from_port         = var.proxy_port
+  to_port           = var.echo_port
   protocol          = "tcp"
   security_group_id = aws_security_group.ecs_security_group.id
   source_security_group_id = aws_security_group.lb_security_group.id
@@ -84,13 +88,38 @@ resource "aws_lb" "ecs_alb" {
   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
-# Create the ALB target group for ECS.
-resource "aws_lb_target_group" "alb_ecs_tg" {
-  name        = "${terraform.workspace}-${var.app_name}-alb-tg-80"
-  port        = 80
+# Create the ALB target group for 'proxy' server on ECS.
+resource "aws_lb_target_group" "alb_ecs_tg_proxy" {
+  name        = "${terraform.workspace}-${var.app_name}-tg-proxy"
+  port        = var.proxy_port
   protocol    = "HTTP"
   target_type = "ip"
   vpc_id      = data.aws_vpc.main.id
+  load_balancing_algorithm_type = "least_outstanding_requests"
+
+  health_check {
+    interval    = 60
+    matcher     = "200,201,202"
+    path        = "/"
+  }
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
+}
+
+# Create the ALB target group for 'echo' server on ECS.
+resource "aws_lb_target_group" "alb_ecs_tg_echo" {
+  name        = "${terraform.workspace}-${var.app_name}-tg-echo"
+  port        = var.echo_port
+  protocol    = "HTTP"
+  target_type = "ip"
+  vpc_id      = data.aws_vpc.main.id
+  load_balancing_algorithm_type = "least_outstanding_requests"
+
+  health_check {
+    interval    = 60
+    matcher     = "200,201,202"
+    path        = "/"
+  }
 
   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
@@ -102,12 +131,51 @@ resource "aws_lb_listener" "ecs_alb_listener" {
   protocol          = "HTTP"
 
   default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.alb_ecs_tg.arn
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "application/json"
+      message_body = jsonencode({
+        message        = "Use 'proxy' route to access echo server"
+        routes         = ["/proxy/*"]
+      })
+      status_code  = "200"
+    }
   }
 
   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
+
+resource "aws_lb_listener_rule" "proxy_route" {
+  listener_arn = aws_lb_listener.ecs_alb_listener.arn
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.alb_ecs_tg_proxy.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/proxy/*"]
+    }
+  }
+}
+
+## Ucomment to access 'echo' server directly on /echo route bypassing 'proxy' server
+# resource "aws_lb_listener_rule" "echo_route" {
+#   listener_arn = aws_lb_listener.ecs_alb_listener.arn
+
+#   action {
+#     type             = "forward"
+#     target_group_arn = aws_lb_target_group.alb_ecs_tg_echo.arn
+#   }
+
+#   condition {
+#     path_pattern {
+#       values = ["/echo/*"]
+#     }
+#   }
+# }
 
 ##############################
 # ECS Cluster
@@ -118,23 +186,32 @@ resource "aws_ecs_cluster" "ecs_cluster" {
   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
-resource "aws_ecs_service" "demo-ecs-service" {
-  depends_on      = [aws_lb_target_group.alb_ecs_tg, aws_lb_listener.ecs_alb_listener]
+resource "aws_ecs_service" "proxy_ecs_service" {
+  depends_on      = [
+    aws_lb_target_group.alb_ecs_tg_echo,
+    aws_lb_target_group.alb_ecs_tg_proxy,
+    aws_lb_listener.ecs_alb_listener,
+  ]
   name            = "${terraform.workspace}-${var.app_name}-service"
   cluster         = aws_ecs_cluster.ecs_cluster.id
 
   task_definition = aws_ecs_task_definition.ecs_taskdef.arn
-  desired_count   = 2
+  desired_count   = 1
   deployment_maximum_percent = 200
   deployment_minimum_healthy_percent = 50
   enable_ecs_managed_tags = false
-  health_check_grace_period_seconds = 60
+  health_check_grace_period_seconds = 180
   launch_type = "FARGATE"
 
   load_balancer {
-    target_group_arn = aws_lb_target_group.alb_ecs_tg.arn
-    container_name   = "web"
-    container_port   = 80
+    target_group_arn = aws_lb_target_group.alb_ecs_tg_proxy.arn
+    container_name   = "proxy"
+    container_port   = var.proxy_port
+  }
+  load_balancer {
+    target_group_arn = aws_lb_target_group.alb_ecs_tg_echo.arn
+    container_name   = "echo"
+    container_port   = var.echo_port
   }
 
   network_configuration {
@@ -148,15 +225,15 @@ resource "aws_ecs_service" "demo-ecs-service" {
 
 # Create the ECS Service task definition. 
 resource "aws_ecs_task_definition" "ecs_taskdef" {
-  family = "service"
+  family = "mock-server"
   container_definitions = jsonencode([
     {
-      name      = "web"
-      image     = var.image_name
+      name      = "proxy"
+      image     = var.image_proxy
       essential = true
       portMappings = [
         {
-          containerPort = 80
+          containerPort = var.proxy_port
           protocol      = "tcp"
         }
       ]
@@ -168,6 +245,27 @@ resource "aws_ecs_task_definition" "ecs_taskdef" {
           awslogs-stream-prefix = "ecs"
         }
       }
+      environment = var.proxy_envs
+    },
+    {
+      name      = "echo"
+      image     = var.image_echo
+      essential = true
+      portMappings = [
+        {
+          containerPort = var.echo_port
+          protocol      = "tcp"
+        }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs",
+        options = {
+          awslogs-group         = "${aws_cloudwatch_log_group.ecs_cluster.name}",
+          awslogs-region        = "${var.region}",
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+      environment = var.echo_envs
     }
   ])
   cpu                       = 256
@@ -235,4 +333,22 @@ resource "aws_apigatewayv2_stage" "apigw_stage" {
   # name        = "${terraform.workspace}-${var.app_name}-http"
   name        = "$default"
   auto_deploy = true
+}
+
+resource "aws_apigatewayv2_domain_name" "api_domain" {
+  count       = local.dns_enabled ? 1 : 0
+  domain_name = var.domain_name
+
+  domain_name_configuration {
+    certificate_arn   = var.cert_arn
+    endpoint_type     = "REGIONAL"
+    security_policy   = "TLS_1_2"
+  }
+}
+
+resource "aws_apigatewayv2_api_mapping" "domain_map" {
+  count       = local.dns_enabled ? 1 : 0
+  api_id      = aws_apigatewayv2_api.apigw_http_endpoint.id
+  domain_name = aws_apigatewayv2_domain_name.api_domain[0].id
+  stage       = aws_apigatewayv2_stage.apigw_stage.id
 }
