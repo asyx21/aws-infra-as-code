@@ -99,7 +99,7 @@ resource "aws_lb_target_group" "alb_ecs_tg_proxy" {
 
   health_check {
     interval    = 60
-    matcher     = "200,201,202"
+    matcher     = "200,202"
     path        = "/"
   }
 
