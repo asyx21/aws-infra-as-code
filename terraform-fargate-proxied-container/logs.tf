@@ -1,3 +1,6 @@
+##############################
+# Cloudwatch
+##############################
 # Cloudwatch log group and S3 Bucket to store logs from the service
 resource "aws_cloudwatch_log_group" "ecs_cluster" {
   name = "/ecs/${terraform.workspace}-${var.app_name}"

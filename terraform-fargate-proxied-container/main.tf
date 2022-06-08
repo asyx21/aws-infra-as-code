@@ -45,6 +45,14 @@ resource "aws_security_group" "ecs_security_group" {
   name        = "${terraform.workspace}-${var.app_name}-ecs"
   description = "ECS Security Group"
   vpc_id = data.aws_vpc.main.id
+
+  # Allow ingress from container to container on VPC
+  ingress {
+    protocol        = "tcp"
+    from_port       = var.proxy_port
+    to_port         = var.echo_port
+    cidr_blocks     = [data.aws_vpc.main.cidr_block]
+  }
   egress {
     description      = "Allow all outbound traffic by default"
     from_port        = 0
@@ -89,10 +97,11 @@ resource "aws_lb" "ecs_alb" {
 }
 
 # Create the ALB target group for 'proxy' server on ECS.
-resource "aws_lb_target_group" "alb_ecs_tg_proxy" {
-  name        = "${terraform.workspace}-${var.app_name}-tg-proxy"
-  port        = var.proxy_port
-  protocol    = "HTTP"
+resource "aws_lb_target_group" "alb_ecs_tg" {
+  for_each    = local.service_config
+  name        = "${terraform.workspace}-${var.app_name}-tg-${each.value.name}"
+  port        = each.value.target_group.port
+  protocol    = each.value.target_group.protocol
   target_type = "ip"
   vpc_id      = data.aws_vpc.main.id
   load_balancing_algorithm_type = "least_outstanding_requests"
@@ -100,25 +109,7 @@ resource "aws_lb_target_group" "alb_ecs_tg_proxy" {
   health_check {
     interval    = 60
     matcher     = "200,202"
-    path        = "/"
-  }
-
-  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
-}
-
-# Create the ALB target group for 'echo' server on ECS.
-resource "aws_lb_target_group" "alb_ecs_tg_echo" {
-  name        = "${terraform.workspace}-${var.app_name}-tg-echo"
-  port        = var.echo_port
-  protocol    = "HTTP"
-  target_type = "ip"
-  vpc_id      = data.aws_vpc.main.id
-  load_balancing_algorithm_type = "least_outstanding_requests"
-
-  health_check {
-    interval    = 60
-    matcher     = "200,201,202"
-    path        = "/"
+    path        = each.value.target_group.health_check_path
   }
 
   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
@@ -136,8 +127,8 @@ resource "aws_lb_listener" "ecs_alb_listener" {
     fixed_response {
       content_type = "application/json"
       message_body = jsonencode({
-        message        = "Use 'proxy' route to access echo server"
-        routes         = ["/proxy/*"]
+        message        = "Use defined routes to access servers"
+        routes         = ["/proxy*", "/echo*"]
       })
       status_code  = "200"
     }
@@ -147,35 +138,20 @@ resource "aws_lb_listener" "ecs_alb_listener" {
 }
 
 resource "aws_lb_listener_rule" "proxy_route" {
+  for_each = local.service_config
   listener_arn = aws_lb_listener.ecs_alb_listener.arn
 
   action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.alb_ecs_tg_proxy.arn
+    target_group_arn = aws_lb_target_group.alb_ecs_tg[each.key].arn
   }
 
   condition {
     path_pattern {
-      values = ["/proxy/*"]
+      values = each.value.target_group.path_pattern
     }
   }
 }
-
-## Ucomment to access 'echo' server directly on /echo route bypassing 'proxy' server
-# resource "aws_lb_listener_rule" "echo_route" {
-#   listener_arn = aws_lb_listener.ecs_alb_listener.arn
-
-#   action {
-#     type             = "forward"
-#     target_group_arn = aws_lb_target_group.alb_ecs_tg_echo.arn
-#   }
-
-#   condition {
-#     path_pattern {
-#       values = ["/echo/*"]
-#     }
-#   }
-# }
 
 ##############################
 # ECS Cluster
@@ -186,17 +162,17 @@ resource "aws_ecs_cluster" "ecs_cluster" {
   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
-resource "aws_ecs_service" "proxy_ecs_service" {
+resource "aws_ecs_service" "mock_ecs_service" {
+  for_each        = local.service_config
   depends_on      = [
-    aws_lb_target_group.alb_ecs_tg_echo,
-    aws_lb_target_group.alb_ecs_tg_proxy,
     aws_lb_listener.ecs_alb_listener,
+    aws_service_discovery_service.service_discoveries,
   ]
-  name            = "${terraform.workspace}-${var.app_name}-service"
+  name            = "${terraform.workspace}-${var.app_name}-${each.value.name}-service"
   cluster         = aws_ecs_cluster.ecs_cluster.id
+  task_definition = aws_ecs_task_definition.service_taskdef[each.key].arn
 
-  task_definition = aws_ecs_task_definition.ecs_taskdef.arn
-  desired_count   = 1
+  desired_count   = each.value.desired_count
   deployment_maximum_percent = 200
   deployment_minimum_healthy_percent = 50
   enable_ecs_managed_tags = false
@@ -204,14 +180,14 @@ resource "aws_ecs_service" "proxy_ecs_service" {
   launch_type = "FARGATE"
 
   load_balancer {
-    target_group_arn = aws_lb_target_group.alb_ecs_tg_proxy.arn
-    container_name   = "proxy"
-    container_port   = var.proxy_port
+    target_group_arn = aws_lb_target_group.alb_ecs_tg[each.key].arn
+    container_name   = each.value.name
+    container_port   = each.value.container_port
   }
-  load_balancer {
-    target_group_arn = aws_lb_target_group.alb_ecs_tg_echo.arn
-    container_name   = "echo"
-    container_port   = var.echo_port
+
+  service_registries {
+    registry_arn      = aws_service_discovery_service.service_discoveries[each.key].arn
+    container_name    = each.value.name
   }
 
   network_configuration {
@@ -223,17 +199,19 @@ resource "aws_ecs_service" "proxy_ecs_service" {
   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
-# Create the ECS Service task definition. 
-resource "aws_ecs_task_definition" "ecs_taskdef" {
-  family = "mock-server"
+resource "aws_ecs_task_definition" "service_taskdef" {
+  for_each         = local.service_config
+  family           = "${lower(var.app_name)}-${each.value.name}"
   container_definitions = jsonencode([
     {
-      name      = "proxy"
-      image     = var.image_proxy
-      essential = true
+      name         = each.value.name
+      image        = each.value.image
+      essential    = true
+      cpu          = each.value.cpu
+      memory       = each.value.memory
       portMappings = [
         {
-          containerPort = var.proxy_port
+          containerPort = each.value.container_port
           protocol      = "tcp"
         }
       ]
@@ -241,35 +219,15 @@ resource "aws_ecs_task_definition" "ecs_taskdef" {
         logDriver = "awslogs",
         options = {
           awslogs-group         = "${aws_cloudwatch_log_group.ecs_cluster.name}",
-          awslogs-region        = "${var.region}",
-          awslogs-stream-prefix = "ecs"
+          awslogs-region        = var.region,
+          awslogs-stream-prefix = var.app_name
         }
       }
-      environment = var.proxy_envs
-    },
-    {
-      name      = "echo"
-      image     = var.image_echo
-      essential = true
-      portMappings = [
-        {
-          containerPort = var.echo_port
-          protocol      = "tcp"
-        }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs",
-        options = {
-          awslogs-group         = "${aws_cloudwatch_log_group.ecs_cluster.name}",
-          awslogs-region        = "${var.region}",
-          awslogs-stream-prefix = "ecs"
-        }
-      }
-      environment = var.echo_envs
+      environment = each.value.environment
     }
   ])
-  cpu                       = 256
-  memory                    = 512
+  cpu                       = each.value.cpu
+  memory                    = each.value.memory
   requires_compatibilities  = ["FARGATE"]
   network_mode              = "awsvpc"
 
@@ -279,8 +237,40 @@ resource "aws_ecs_task_definition" "ecs_taskdef" {
   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
 }
 
+#####################################################
+# Service Discovery for inter-service communication
+#####################################################
+resource "aws_service_discovery_private_dns_namespace" "sd_namespace" {
+  name            = "${terraform.workspace}.${var.app_name}.sd"
+  description     = "${terraform.workspace}-${var.app_name} service discovery namespace"
+  vpc             = data.aws_vpc.main.id
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
+}
+
+resource "aws_service_discovery_service" "service_discoveries" {
+  for_each         = local.service_config
+  name             = each.key
+
+  dns_config {
+    namespace_id   = aws_service_discovery_private_dns_namespace.sd_namespace.id
+
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+    # routing_policy = "MULTIVALUE"
+  }
+
+  health_check_custom_config {
+    failure_threshold = 3
+  }
+
+  tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
+}
+
 ##############################
-# API Gateway
+# API Gateway HTTP
 ##############################
 # Create the VPC Link configured with the private subnets. Security groups are kept empty here, but can be configured as required.
 resource "aws_apigatewayv2_vpc_link" "vpclink_apigw_to_alb" {
@@ -352,3 +342,14 @@ resource "aws_apigatewayv2_api_mapping" "domain_map" {
   domain_name = aws_apigatewayv2_domain_name.api_domain[0].id
   stage       = aws_apigatewayv2_stage.apigw_stage.id
 }
+
+##############################
+# API Gateway Websocket
+##############################
+# resource "aws_apigatewayv2_api" "ws_api" {
+#   name                = "${terraform.workspace}-${var.app_name}-ws-endpoint"
+#   protocol_type       = "WEBSOCKET"
+#   route_selection_expression = "$request.body.action"
+
+#   tags = merge(var.default_tags, { Project = var.app_name, Environment = terraform.workspace })
+# }
